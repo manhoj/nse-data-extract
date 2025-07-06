@@ -1,4 +1,4 @@
-# Kite Data Extractor
+# Kite Data Extractor 
 
 A comprehensive tool for extracting and analyzing Indian stock market data using Zerodha Kite API. This project provides both a web interface (Streamlit) and command-line tools for data extraction, analysis, and automated trading insights.
 
@@ -187,7 +187,7 @@ For issues and questions:
 1. Check the documentation above
 2. Review the error logs
 3. Ensure all environment variables are set correctly
-4. Verify your Kite API credentials are valid
+4. Verify your Kite API,database and other credentials are valid
 
 ## 🔄 Updates
 
