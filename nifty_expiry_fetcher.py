@@ -1,408 +1,230 @@
-"""
-NIFTY 50 Expiry Dates Fetcher
-Fetches all available expiry dates for NIFTY 50 options
-
-Requirements:
-- kiteconnect
-- pandas
-
-Run with:
-python nifty_expiry_fetcher.py
-"""
+# NIFTY Expiry Day Marker Implementation
+# This code identifies and marks NIFTY expiry days based on NSE rules
 
 import pandas as pd
 from datetime import datetime, timedelta
-from kiteconnect import KiteConnect
-import calendar
-from dotenv import load_dotenv
-import os
+import numpy as np
 
-# Import authentication module
-try:
-    from kite_authenticator import get_kite_token
-except ImportError:
-    print("❌ Error: kite_authenticator.py not found!")
-    exit(1)
+def get_last_thursday_of_month(year, month):
+    """Get the last Thursday of a given month"""
+    # Start from the last day of the month
+    if month == 12:
+        next_month = datetime(year + 1, 1, 1)
+    else:
+        next_month = datetime(year, month + 1, 1)
+    
+    last_day = next_month - timedelta(days=1)
+    
+    # Find the last Thursday
+    while last_day.weekday() != 3:  # Thursday is 3
+        last_day -= timedelta(days=1)
+    
+    return last_day
 
-load_dotenv()
+def is_thursday(date):
+    """Check if a date is Thursday"""
+    return date.weekday() == 3
 
-class NiftyExpiryFetcher:
+def is_last_thursday_of_month(date):
+    """Check if a date is the last Thursday of its month"""
+    last_thursday = get_last_thursday_of_month(date.year, date.month)
+    return date.date() == last_thursday.date()
+
+def mark_nifty_expiry_days(df, date_column='date', trading_day_column=None):
     """
-    Fetches and analyzes NIFTY 50 option expiry dates
+    Mark NIFTY expiry days in a DataFrame
+    
+    Parameters:
+    df: DataFrame with trading data
+    date_column: Name of the date column
+    trading_day_column: Optional column indicating if it's a trading day (1) or holiday (0)
+    
+    Returns:
+    DataFrame with additional columns:
+    - is_expiry: 1 if it's an expiry day, 0 otherwise
+    - expiry_type: 'weekly', 'monthly', or None
+    - adjusted_expiry: 1 if expiry was adjusted due to holiday
     """
     
-    def __init__(self):
-        """Initialize the expiry fetcher"""
-        print("🔐 Initializing NIFTY Expiry Fetcher...")
-        self.access_token = get_kite_token(force_new=False)
-        
-        if not self.access_token:
-            print("❌ Failed to get access token!")
-            raise Exception("No valid access token available")
-        
-        # Initialize Kite API
-        self.api_key = os.environ["KITE_API_KEY"]
-        self.kite = KiteConnect(api_key=self.api_key)
-        self.kite.set_access_token(self.access_token)
-        
-        print("✅ NIFTY Expiry Fetcher initialized successfully!")
+    # Ensure date column is datetime
+    df[date_column] = pd.to_datetime(df[date_column])
     
-    def get_all_nifty_expiries(self):
-        """
-        Get all available expiry dates for NIFTY 50 options
-        
-        Returns:
-            dict: Categorized expiry dates (weekly, monthly, etc.)
-        """
-        try:
-            print("📅 Fetching all NIFTY 50 expiry dates...")
-            
-            # Get all NFO instruments
-            instruments = self.kite.instruments("NFO")
-            
-            # Filter for NIFTY options
-            nifty_expiries = set()
-            
-            for instrument in instruments:
-                if (instrument['name'] == 'NIFTY' and 
-                    instrument['instrument_type'] in ['CE', 'PE'] and
-                    instrument['segment'] == 'NFO-OPT'):
-                    nifty_expiries.add(instrument['expiry'])
-            
-            # Convert to sorted list
-            expiry_list = sorted(list(nifty_expiries))
-            
-            print(f"✅ Found {len(expiry_list)} unique expiry dates")
-            
-            # Categorize expiries
-            categorized = self.categorize_expiries(expiry_list)
-            
-            return categorized
-            
-        except Exception as e:
-            print(f"❌ Error fetching expiry dates: {e}")
-            return None
+    # Sort by date
+    df = df.sort_values(date_column).copy()
     
-    def categorize_expiries(self, expiry_list):
-        """
-        Categorize expiry dates into weekly and monthly
+    # Initialize columns
+    df['is_expiry'] = 0
+    df['expiry_type'] = None
+    df['adjusted_expiry'] = 0
+    
+    # Create a set of all trading dates for quick lookup
+    if trading_day_column:
+        trading_dates = set(df[df[trading_day_column] == 1][date_column].dt.date)
+    else:
+        trading_dates = set(df[date_column].dt.date)
+    
+    # Process each month in the date range
+    start_date = df[date_column].min()
+    end_date = df[date_column].max()
+    
+    current_date = start_date.replace(day=1)
+    
+    while current_date <= end_date:
+        year = current_date.year
+        month = current_date.month
         
-        Args:
-            expiry_list (list): List of expiry dates
+        # Find all Thursdays in this month
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            month_end = datetime(year, month + 1, 1) - timedelta(days=1)
+        
+        # Get all Thursdays in the month
+        thursdays = []
+        current = month_start
+        while current <= month_end:
+            if is_thursday(current):
+                thursdays.append(current)
+            current += timedelta(days=1)
+        
+        # Process each Thursday
+        for thursday in thursdays:
+            is_monthly = is_last_thursday_of_month(thursday)
             
-        Returns:
-            dict: Categorized expiry dates
-        """
-        weekly_expiries = []
-        monthly_expiries = []
-        
-        for expiry in expiry_list:
-            # Check if it's the last Thursday of the month (monthly expiry)
-            if self.is_monthly_expiry(expiry):
-                monthly_expiries.append(expiry)
+            # Check if Thursday is a trading day
+            if thursday.date() in trading_dates:
+                # Mark as expiry
+                mask = df[date_column].dt.date == thursday.date()
+                df.loc[mask, 'is_expiry'] = 1
+                df.loc[mask, 'expiry_type'] = 'monthly' if is_monthly else 'weekly'
             else:
-                weekly_expiries.append(expiry)
+                # Thursday is a holiday, find previous trading day
+                adjusted_date = thursday - timedelta(days=1)
+                while adjusted_date.date() not in trading_dates and adjusted_date >= month_start:
+                    adjusted_date -= timedelta(days=1)
+                
+                if adjusted_date.date() in trading_dates:
+                    mask = df[date_column].dt.date == adjusted_date.date()
+                    df.loc[mask, 'is_expiry'] = 1
+                    df.loc[mask, 'expiry_type'] = 'monthly' if is_monthly else 'weekly'
+                    df.loc[mask, 'adjusted_expiry'] = 1
         
-        return {
-            'all': expiry_list,
-            'weekly': weekly_expiries,
-            'monthly': monthly_expiries,
-            'upcoming': expiry_list[:5] if len(expiry_list) >= 5 else expiry_list
-        }
+        # Move to next month
+        if month == 12:
+            current_date = datetime(year + 1, 1, 1)
+        else:
+            current_date = datetime(year, month + 1, 1)
     
-    def is_monthly_expiry(self, expiry_date):
-        """
-        Check if the given date is a monthly expiry (last Thursday of month)
-        
-        Args:
-            expiry_date (date): Expiry date to check
-            
-        Returns:
-            bool: True if monthly expiry, False otherwise
-        """
-        # Get the last day of the month
-        last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
-        last_date = datetime(expiry_date.year, expiry_date.month, last_day).date()
-        
-        # Find the last Thursday
-        while last_date.weekday() != 3:  # 3 = Thursday
-            last_date -= timedelta(days=1)
-        
-        return expiry_date == last_date
-    
-    def get_current_and_next_expiry(self):
-        """
-        Get current and next expiry dates
-        
-        Returns:
-            tuple: (current_expiry, next_expiry)
-        """
-        today = datetime.now().date()
-        all_expiries = self.get_all_nifty_expiries()
-        
-        if not all_expiries:
-            return None, None
-        
-        expiry_list = all_expiries['all']
-        
-        # Find current expiry (first expiry >= today)
-        current_expiry = None
-        next_expiry = None
-        
-        for i, expiry in enumerate(expiry_list):
-            if expiry >= today:
-                current_expiry = expiry
-                if i + 1 < len(expiry_list):
-                    next_expiry = expiry_list[i + 1]
-                break
-        
-        return current_expiry, next_expiry
-    
-    def display_expiry_calendar(self, expiries_data):
-        """
-        Display expiry dates in a formatted calendar view
-        
-        Args:
-            expiries_data (dict): Categorized expiry data
-        """
-        if not expiries_data:
-            print("❌ No expiry data to display")
-            return
-        
-        print("\n" + "="*60)
-        print("📅 NIFTY 50 OPTION EXPIRY CALENDAR")
-        print("="*60)
-        
-        # Display upcoming expiries
-        print("\n🔜 UPCOMING EXPIRIES:")
-        print("-"*40)
-        for expiry in expiries_data['upcoming']:
-            expiry_type = "Monthly" if expiry in expiries_data['monthly'] else "Weekly"
-            days_to_expiry = (expiry - datetime.now().date()).days
-            day_name = expiry.strftime('%A')
-            
-            if days_to_expiry == 0:
-                status = "📍 TODAY!"
-            elif days_to_expiry < 0:
-                status = "✅ Expired"
-            else:
-                status = f"📆 {days_to_expiry} days"
-            
-            print(f"{expiry.strftime('%Y-%m-%d')} ({day_name}) - {expiry_type:<8} {status}")
-        
-        # Display monthly expiries
-        print("\n📆 MONTHLY EXPIRIES:")
-        print("-"*40)
-        for expiry in expiries_data['monthly'][:6]:  # Show next 6 monthly expiries
-            days_to_expiry = (expiry - datetime.now().date()).days
-            if days_to_expiry >= 0:
-                print(f"{expiry.strftime('%Y-%m-%d')} - {expiry.strftime('%B %Y')} ({days_to_expiry} days)")
-        
-        # Summary statistics
-        print("\n📊 SUMMARY:")
-        print("-"*40)
-        print(f"Total Expiries Available: {len(expiries_data['all'])}")
-        print(f"Weekly Expiries: {len(expiries_data['weekly'])}")
-        print(f"Monthly Expiries: {len(expiries_data['monthly'])}")
-        
-        # Next expiry info
-        current_expiry, next_expiry = self.get_current_and_next_expiry()
-        if current_expiry:
-            print(f"\n🎯 Current Expiry: {current_expiry.strftime('%Y-%m-%d (%A)')}")
-            days_to_current = (current_expiry - datetime.now().date()).days
-            print(f"   Days to expiry: {days_to_current}")
-        
-        if next_expiry:
-            print(f"\n📍 Next Expiry: {next_expiry.strftime('%Y-%m-%d (%A)')}")
-            days_to_next = (next_expiry - datetime.now().date()).days
-            print(f"   Days to expiry: {days_to_next}")
-    
-    def get_strikes_for_expiry(self, expiry_date):
-        """
-        Get all available strikes for a specific expiry date
-        
-        Args:
-            expiry_date (date): Expiry date
-            
-        Returns:
-            list: Available strike prices
-        """
-        try:
-            instruments = self.kite.instruments("NFO")
-            strikes = set()
-            
-            for instrument in instruments:
-                if (instrument['name'] == 'NIFTY' and 
-                    instrument['instrument_type'] in ['CE', 'PE'] and
-                    instrument['expiry'] == expiry_date):
-                    strikes.add(instrument['strike'])
-            
-            return sorted(list(strikes))
-            
-        except Exception as e:
-            print(f"❌ Error fetching strikes: {e}")
-            return []
-    
-    def analyze_expiry_pattern(self):
-        """
-        Analyze expiry patterns and provide insights
-        """
-        expiries_data = self.get_all_nifty_expiries()
-        
-        if not expiries_data:
-            print("❌ No expiry data available")
-            return
-        
-        print("\n" + "="*60)
-        print("📊 EXPIRY PATTERN ANALYSIS")
-        print("="*60)
-        
-        # Analyze weekly expiries
-        weekly_expiries = expiries_data['weekly']
-        if weekly_expiries:
-            print("\n📈 WEEKLY EXPIRY PATTERN:")
-            print("-"*40)
-            
-            # Check day of week
-            thursday_count = sum(1 for exp in weekly_expiries if exp.weekday() == 3)
-            print(f"Thursday Expiries: {thursday_count}/{len(weekly_expiries)} ({thursday_count/len(weekly_expiries)*100:.1f}%)")
-            
-            # Check if there are non-Thursday expiries (holidays)
-            non_thursday = [exp for exp in weekly_expiries if exp.weekday() != 3]
-            if non_thursday:
-                print(f"\n⚠️  Non-Thursday Expiries (Holiday adjustments):")
-                for exp in non_thursday[:5]:  # Show first 5
-                    print(f"   {exp.strftime('%Y-%m-%d (%A)')}")
-        
-        # Analyze monthly expiries
-        monthly_expiries = expiries_data['monthly']
-        if monthly_expiries:
-            print("\n📈 MONTHLY EXPIRY PATTERN:")
-            print("-"*40)
-            
-            # Group by month
-            months_covered = set(exp.strftime('%Y-%m') for exp in monthly_expiries)
-            print(f"Months with monthly expiries: {len(months_covered)}")
-            
-            # Check continuity
-            print(f"Continuous monthly expiries available: {'Yes' if len(months_covered) >= 12 else 'No'}")
+    return df
 
-def main():
-    """Main function"""
-    print("🔷 NIFTY 50 EXPIRY DATES FETCHER")
-    print("="*50)
-    
-    try:
-        # Initialize fetcher
-        fetcher = NiftyExpiryFetcher()
-        
-        while True:
-            print("\n📋 OPTIONS:")
-            print("1. 📅 View All Expiry Dates")
-            print("2. 🎯 Get Current & Next Expiry")
-            print("3. 📊 Analyze Expiry Patterns")
-            print("4. 🔢 Get Strikes for Specific Expiry")
-            print("5. 📆 Export Expiry Calendar")
-            print("6. ❌ Exit")
-            
-            choice = input("\nEnter your choice (1-6): ").strip()
-            
-            if choice == "1":
-                expiries_data = fetcher.get_all_nifty_expiries()
-                if expiries_data:
-                    fetcher.display_expiry_calendar(expiries_data)
-                    
-            elif choice == "2":
-                current, next_exp = fetcher.get_current_and_next_expiry()
-                
-                print("\n🎯 CURRENT & NEXT EXPIRY")
-                print("-"*40)
-                
-                if current:
-                    days_to_current = (current - datetime.now().date()).days
-                    print(f"Current Expiry: {current.strftime('%Y-%m-%d (%A)')}")
-                    print(f"Days to expiry: {days_to_current}")
-                    
-                    # Get strikes for current expiry
-                    strikes = fetcher.get_strikes_for_expiry(current)
-                    if strikes:
-                        print(f"Available strikes: {len(strikes)}")
-                        print(f"Strike range: {min(strikes)} - {max(strikes)}")
-                
-                if next_exp:
-                    days_to_next = (next_exp - datetime.now().date()).days
-                    print(f"\nNext Expiry: {next_exp.strftime('%Y-%m-%d (%A)')}")
-                    print(f"Days to expiry: {days_to_next}")
-                    
-            elif choice == "3":
-                fetcher.analyze_expiry_pattern()
-                
-            elif choice == "4":
-                expiries_data = fetcher.get_all_nifty_expiries()
-                if expiries_data:
-                    print("\n📅 Available Expiries:")
-                    for i, exp in enumerate(expiries_data['upcoming'], 1):
-                        print(f"{i}. {exp.strftime('%Y-%m-%d (%A)')}")
-                    
-                    exp_choice = input("\nSelect expiry number: ").strip()
-                    try:
-                        idx = int(exp_choice) - 1
-                        if 0 <= idx < len(expiries_data['upcoming']):
-                            selected_expiry = expiries_data['upcoming'][idx]
-                            strikes = fetcher.get_strikes_for_expiry(selected_expiry)
-                            
-                            print(f"\n🔢 Strikes for {selected_expiry.strftime('%Y-%m-%d')}:")
-                            print("-"*40)
-                            print(f"Total strikes: {len(strikes)}")
-                            
-                            if strikes:
-                                print(f"Range: {min(strikes)} - {max(strikes)}")
-                                print(f"Gap: {strikes[1] - strikes[0] if len(strikes) > 1 else 'N/A'}")
-                                
-                                # Show sample strikes
-                                print("\nSample strikes:")
-                                sample_strikes = strikes[::max(1, len(strikes)//10)][:10]
-                                print(", ".join(str(s) for s in sample_strikes))
-                    except (ValueError, IndexError):
-                        print("❌ Invalid selection")
-                        
-            elif choice == "5":
-                expiries_data = fetcher.get_all_nifty_expiries()
-                if expiries_data:
-                    # Create DataFrame
-                    df_data = []
-                    for exp in expiries_data['all']:
-                        exp_type = "Monthly" if exp in expiries_data['monthly'] else "Weekly"
-                        days_to_exp = (exp - datetime.now().date()).days
-                        
-                        df_data.append({
-                            'expiry_date': exp,
-                            'day_name': exp.strftime('%A'),
-                            'type': exp_type,
-                            'days_to_expiry': days_to_exp,
-                            'month': exp.strftime('%B %Y')
-                        })
-                    
-                    df = pd.DataFrame(df_data)
-                    
-                    # Save to CSV
-                    filename = f"nifty_expiry_calendar_{datetime.now().strftime('%Y%m%d')}.csv"
-                    df.to_csv(filename, index=False)
-                    print(f"✅ Expiry calendar exported to: {filename}")
-                    
-            elif choice == "6":
-                print("👋 Exiting...")
-                break
-                
-            else:
-                print("❌ Invalid choice! Please try again.")
-                
-    except KeyboardInterrupt:
-        print("\n\n⏹️ Process interrupted by user")
-    except Exception as e:
-        print(f"\n❌ Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
+# SQL Implementation for marking expiry days
+sql_query = """
+-- SQL query to mark NIFTY expiry days
+-- This assumes you have a calendar table with trading days marked
 
+WITH thursday_dates AS (
+    -- Get all Thursdays
+    SELECT 
+        date,
+        EXTRACT(DOW FROM date) as day_of_week,
+        EXTRACT(DAY FROM date) as day_of_month,
+        DATE_TRUNC('month', date) as month_start,
+        DATE_TRUNC('month', date + INTERVAL '1 month') - INTERVAL '1 day' as month_end
+    FROM your_nifty_table
+    WHERE EXTRACT(DOW FROM date) = 4  -- Thursday
+),
+last_thursdays AS (
+    -- Identify last Thursday of each month
+    SELECT 
+        date,
+        CASE 
+            WHEN date = MAX(date) OVER (PARTITION BY DATE_TRUNC('month', date))
+            THEN 1 
+            ELSE 0 
+        END as is_last_thursday
+    FROM thursday_dates
+),
+expiry_schedule AS (
+    -- Create expiry schedule
+    SELECT 
+        t.date as scheduled_expiry,
+        CASE 
+            WHEN lt.is_last_thursday = 1 THEN 'monthly'
+            ELSE 'weekly'
+        END as expiry_type
+    FROM thursday_dates t
+    JOIN last_thursdays lt ON t.date = lt.date
+),
+adjusted_expiries AS (
+    -- Adjust for holidays
+    SELECT 
+        es.scheduled_expiry,
+        es.expiry_type,
+        CASE 
+            WHEN nt.is_trading_day = 1 THEN es.scheduled_expiry
+            ELSE (
+                -- Find previous trading day
+                SELECT MAX(date) 
+                FROM your_nifty_table 
+                WHERE date < es.scheduled_expiry 
+                AND is_trading_day = 1
+            )
+        END as actual_expiry_date
+    FROM expiry_schedule es
+    LEFT JOIN your_nifty_table nt ON es.scheduled_expiry = nt.date
+)
+-- Final query to update your table
+UPDATE your_nifty_table
+SET 
+    is_expiry = CASE 
+        WHEN date IN (SELECT actual_expiry_date FROM adjusted_expiries) 
+        THEN 1 
+        ELSE 0 
+    END,
+    expiry_type = (
+        SELECT expiry_type 
+        FROM adjusted_expiries 
+        WHERE actual_expiry_date = your_nifty_table.date
+    ),
+    adjusted_expiry = CASE 
+        WHEN date IN (
+            SELECT actual_expiry_date 
+            FROM adjusted_expiries 
+            WHERE actual_expiry_date != scheduled_expiry
+        ) THEN 1 
+        ELSE 0 
+    END;
+"""
+
+# Example usage
 if __name__ == "__main__":
-    main()
+    # Example DataFrame
+    dates = pd.date_range(start='2023-07-25', end='2025-07-10', freq='D')
+    df = pd.DataFrame({'date': dates})
+    
+    # Simulate some holidays (you would use actual trading calendar)
+    # Remove some Thursdays as holidays for demonstration
+    df['is_trading_day'] = 1
+    df.loc[df['date'].isin(['2023-08-15', '2024-03-29', '2024-08-15']), 'is_trading_day'] = 0
+    
+    # Mark expiry days
+    result_df = mark_nifty_expiry_days(df, 'date', 'is_trading_day')
+    
+    # Display expiry days
+    expiry_days = result_df[result_df['is_expiry'] == 1]
+    print("Sample of identified expiry days:")
+    print(expiry_days[['date', 'expiry_type', 'adjusted_expiry']].head(20))
+    
+    # Summary statistics
+    print(f"\nTotal expiry days: {len(expiry_days)}")
+    print(f"Weekly expiries: {len(expiry_days[expiry_days['expiry_type'] == 'weekly'])}")
+    print(f"Monthly expiries: {len(expiry_days[expiry_days['expiry_type'] == 'monthly'])}")
+    print(f"Adjusted expiries: {len(expiry_days[expiry_days['adjusted_expiry'] == 1])}")
+
+# NIFTY Expiry Rules Summary:
+# 1. Weekly expiry: Every Thursday of the week
+# 2. Monthly expiry: Last Thursday of the month (also counts as weekly)
+# 3. If Thursday is a trading holiday, expiry is on the previous trading day
+# 4. These rules have been consistent for the NSE equity derivatives segment
+# 5. Bank Nifty follows the same pattern but has different contract specifications

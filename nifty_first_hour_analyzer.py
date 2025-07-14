@@ -1,21 +1,11 @@
 """
-NIFTY First Hour Movement Analyzer
-Analyzes NIFTY's first hour movement (9:15 AM - 10:15 AM) and sends Telegram alerts
+NIFTY First Hour Movement Analyzer - Corrected Version
+Uses the same data fetching logic as the Streamlit app for accurate results
 
-Requirements:
-- kiteconnect
-- pandas
-- python-telegram-bot
-- schedule (for automation)
-- python-dotenv (for environment variables)
-
-Install requirements:
-pip install kiteconnect pandas python-telegram-bot schedule python-dotenv
-
-Usage:
-1. Update telegram_config.py with your bot token and chat ID (or use .env file)
-2. Run manually at 10:15 AM or set up as a scheduled task
-3. Can also run with scheduler: python nifty_first_hour_analyzer.py --scheduled
+Key changes:
+1. Uses fetch_historical_data_chunked method
+2. Applies same timezone handling
+3. Uses same data processing pipeline
 """
 
 import pandas as pd
@@ -29,15 +19,20 @@ import time as time_module
 from dotenv import load_dotenv
 import os
 
-# Import authentication and telegram modules
+# Load environment variables
+load_dotenv()
+
+# Import required modules
 try:
     from kite_authenticator import get_kite_token
-    from telegram_config import send_telegram_message, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    from telegram_config import send_telegram_message
+    from data_extractor import DataExtractor
 except ImportError:
     print("❌ Error: Required modules not found!")
     print("Make sure you have:")
-    print("  - kite_authenticator.py (from your existing setup)")
-    print("  - telegram_config.py (create this with your Telegram bot details)")
+    print("  - kite_authenticator.py")
+    print("  - telegram_config.py")
+    print("  - data_extractor.py")
     exit(1)
 
 # Set up logging
@@ -51,139 +46,138 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class NiftyFirstHourAnalyzer:
+class NiftyFirstHourAnalyzer(DataExtractor):
     """
-    Analyzes NIFTY's first hour movement and sends trading signals
+    Analyzes NIFTY's first hour movement using the same logic as data_extractor
+    Inherits from DataExtractor to use the same data fetching methods
     """
     
-    def __init__(self):
+    def __init__(self, debug=False):
         """Initialize the analyzer"""
         logger.info("🔐 Initializing NIFTY First Hour Analyzer...")
         
-        # Get access token
-        self.access_token = get_kite_token(force_new=False)
+        self.debug = debug
         
-        if not self.access_token:
-            logger.error("❌ Failed to get access token!")
-            raise Exception("No valid access token available")
+        # Initialize parent class (DataExtractor)
+        super().__init__()
         
-        # Initialize Kite API
-        self.api_key = os.environ["KITE_API_KEY"]
-        self.kite = KiteConnect(api_key=self.api_key)
-        self.kite.set_access_token(self.access_token)
-        
-        # NIFTY 50 token
-        self.nifty_token = 256265  # Standard NIFTY 50 token
-        
-        logger.info("✅ Analyzer initialized successfully!")
-    
-    def get_market_open_time(self, date):
-        """Get market open time (9:15 AM IST)"""
-        return date.replace(hour=9, minute=15, second=0, microsecond=0)
-    
-    def get_first_hour_end_time(self, date):
-        """Get first hour end time (10:15 AM IST)"""
-        return date.replace(hour=10, minute=15, second=0, microsecond=0)
-    
-    def ensure_timezone_naive(self, df):
-        """Ensure DataFrame date column is timezone-naive"""
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'])
-            if df['date'].dt.tz is not None:
-                df['date'] = df['date'].dt.tz_localize(None)
-        return df
-    
-    def fetch_nifty_data(self, from_time, to_time, interval="minute"):
-        """
-        Fetch NIFTY data for specified time range
-        
-        Args:
-            from_time (datetime): Start time
-            to_time (datetime): End time
-            interval (str): Data interval
-            
-        Returns:
-            pd.DataFrame: NIFTY data
-        """
+        # Verify connection
         try:
-            logger.info(f"📊 Fetching NIFTY data from {from_time} to {to_time}")
-            
-            historical_data = self.kite.historical_data(
-                instrument_token=self.nifty_token,
-                from_date=from_time,
-                to_date=to_time,
-                interval=interval
-            )
-            
-            if historical_data:
-                df = pd.DataFrame(historical_data)
-                df = self.ensure_timezone_naive(df)
-                logger.info(f"✅ Fetched {len(df)} records")
-                return df
-            else:
-                logger.warning("⚠️ No data returned")
-                return pd.DataFrame()
-                
+            profile = self.kite.profile()
+            logger.info(f"✅ Connected as: {profile.get('user_name', 'Unknown')}")
         except Exception as e:
-            logger.error(f"❌ Error fetching data: {e}")
-            return pd.DataFrame()
+            logger.error(f"❌ Connection verification failed: {e}")
+            raise
     
-    def calculate_first_hour_movement(self):
+    def calculate_first_hour_movement(self, target_date=None):
         """
         Calculate NIFTY's movement in the first hour of trading
+        Using the same logic as streamlit_app extract_data function
+        
+        Args:
+            target_date (datetime, optional): Specific date to analyze
         
         Returns:
             dict: Movement details and trading signal
         """
         try:
-            current_time = datetime.now()
-            today = current_time.date()
+            if target_date:
+                current_time = target_date
+                today = target_date.date()
+            else:
+                current_time = datetime.now()
+                today = current_time.date()
             
             # Check if it's a weekday
-            if current_time.weekday() > 4:  # Saturday = 5, Sunday = 6
-                logger.warning("📅 Today is weekend. Markets are closed.")
+            if today.weekday() > 4:  # Saturday = 5, Sunday = 6
+                logger.warning("📅 Target date is weekend. Markets are closed.")
                 return None
             
-            # Define time windows
-            market_open = self.get_market_open_time(datetime.combine(today, time()))
-            first_hour_end = self.get_first_hour_end_time(datetime.combine(today, time()))
-            
-            # Check if current time is appropriate (should be after 10:15 AM)
-            if current_time < first_hour_end:
+            # For live analysis, check if current time is after 10:15 AM
+            if not target_date and current_time.time() < time(10, 15):
                 logger.warning(f"⏰ Too early! Current time: {current_time.strftime('%H:%M')}. Wait until 10:15 AM.")
                 return None
             
-            # Fetch minute data for the first hour
-            logger.info("📈 Analyzing first hour movement...")
-            df_minute = self.fetch_nifty_data(
-                from_time=market_open - timedelta(minutes=5),  # Buffer for data availability
-                to_time=first_hour_end + timedelta(minutes=5),  # Buffer
+            # Define time windows (same as market hours)
+            market_open = datetime.combine(today, time(9, 15))
+            first_hour_end = datetime.combine(today, time(10, 15))
+            
+            # Get NIFTY token
+            nifty_token = self.get_nifty50_token()
+            
+            # Calculate date range with buffer (same as streamlit logic)
+            # For intraday intervals, include buffer and current day
+            end_date = first_hour_end + timedelta(minutes=5)  # Small buffer after 10:15
+            start_date = market_open - timedelta(minutes=5)   # Small buffer before 9:15
+            
+            logger.info(f"📈 Fetching NIFTY data for first hour analysis...")
+            logger.info(f"📅 Date range: {start_date} to {end_date}")
+            
+            # Use the same fetch method as streamlit app
+            df = self.fetch_historical_data_chunked(
+                instrument_token=nifty_token,
+                from_date=start_date,
+                to_date=end_date,
                 interval="minute"
             )
             
-            if df_minute.empty:
-                logger.error("❌ No minute data available")
+            if df.empty:
+                logger.error("❌ No data returned from API")
                 return None
             
-            # Filter data for exact first hour window
-            df_first_hour = df_minute[
-                (df_minute['date'] >= market_open) & 
-                (df_minute['date'] <= first_hour_end)
+            # Process data (same as streamlit)
+            df = self.process_data(df, "NIFTY 50")
+            
+            # Filter for exact first hour window
+            # The data should already be timezone-naive from process_data
+            df_first_hour = df[
+                (df['date'] >= market_open) & 
+                (df['date'] <= first_hour_end)
             ].copy()
             
             if df_first_hour.empty:
                 logger.error("❌ No data for first hour window")
                 return None
             
-            # Get opening and current values
-            open_price = df_first_hour.iloc[0]['open']  # First minute open
-            close_price = df_first_hour.iloc[-1]['close']  # Last available close
+            # Sort by date to ensure correct order
+            df_first_hour = df_first_hour.sort_values('date').reset_index(drop=True)
+            
+            if self.debug:
+                logger.info(f"🔍 Debug Info - First Hour Data:")
+                logger.info(f"   Total records: {len(df_first_hour)}")
+                logger.info(f"   Time range: {df_first_hour['date'].min()} to {df_first_hour['date'].max()}")
+                
+                # Show first few and last few records
+                logger.info("📊 First 3 records:")
+                for idx in range(min(3, len(df_first_hour))):
+                    row = df_first_hour.iloc[idx]
+                    logger.info(f"   {row['date']} - O:{row['open']:.2f}, H:{row['high']:.2f}, L:{row['low']:.2f}, C:{row['close']:.2f}")
+                
+                logger.info("📊 Last 3 records:")
+                for idx in range(max(0, len(df_first_hour)-3), len(df_first_hour)):
+                    row = df_first_hour.iloc[idx]
+                    logger.info(f"   {row['date']} - O:{row['open']:.2f}, H:{row['high']:.2f}, L:{row['low']:.2f}, C:{row['close']:.2f}")
+            
+            # Get values for analysis
+            # First row's open price (9:15 open)
+            open_price = df_first_hour.iloc[0]['open']
+            open_time = df_first_hour.iloc[0]['date']
+            
+            # Last row's close price (10:15 close)
+            close_price = df_first_hour.iloc[-1]['close']
+            close_time = df_first_hour.iloc[-1]['date']
+            
+            # High and low for the entire first hour
             high_price = df_first_hour['high'].max()
             low_price = df_first_hour['low'].min()
             
             # Calculate movement
             price_movement = close_price - open_price
             price_movement_pct = (price_movement / open_price) * 100
+            
+            # Volume analysis
+            total_volume = df_first_hour['volume'].sum()
+            avg_volume = df_first_hour['volume'].mean()
             
             # Determine trading signal based on movement
             if price_movement > 50:
@@ -209,19 +203,29 @@ class NiftyFirstHourAnalyzer:
             
             result = {
                 'timestamp': current_time,
+                'analysis_date': today,
+                'open_time': open_time,
+                'close_time': close_time,
                 'open_price': open_price,
                 'current_price': close_price,
                 'high_price': high_price,
                 'low_price': low_price,
                 'price_movement': price_movement,
                 'price_movement_pct': price_movement_pct,
+                'total_volume': total_volume,
+                'avg_volume': avg_volume,
                 'signal': signal,
                 'action': action,
                 'emoji': emoji,
                 'data_points': len(df_first_hour)
             }
             
-            logger.info(f"✅ Analysis complete: {signal} | Movement: {price_movement:.2f} points ({price_movement_pct:.2f}%)")
+            logger.info(f"✅ Analysis complete:")
+            logger.info(f"   Signal: {signal}")
+            logger.info(f"   Movement: {price_movement:.2f} points ({price_movement_pct:.2f}%)")
+            logger.info(f"   Open: {open_price:.2f} at {open_time}")
+            logger.info(f"   Close: {close_price:.2f} at {close_time}")
+            
             return result
             
         except Exception as e:
@@ -245,19 +249,25 @@ class NiftyFirstHourAnalyzer:
         
         # Format timestamp
         time_str = analysis['timestamp'].strftime('%d-%b-%Y %I:%M %p')
+        analysis_date_str = analysis['analysis_date'].strftime('%d-%b-%Y')
         
         # Create message
         message = f"""
 {analysis['emoji']} *NIFTY First Hour Analysis*
 📅 {time_str}
+📊 Analysis Date: {analysis_date_str}
 
 *First Hour Movement (9:15 AM - 10:15 AM):*
-• Open: {analysis['open_price']:.2f}
-• Current: {analysis['current_price']:.2f}
-• High: {analysis['high_price']:.2f}
-• Low: {analysis['low_price']:.2f}
+• Open: ₹{analysis['open_price']:.2f} (at {analysis['open_time'].strftime('%H:%M:%S')})
+• Close: ₹{analysis['current_price']:.2f} (at {analysis['close_time'].strftime('%H:%M:%S')})
+• High: ₹{analysis['high_price']:.2f}
+• Low: ₹{analysis['low_price']:.2f}
 
 *Movement: {analysis['price_movement']:+.2f} points ({analysis['price_movement_pct']:+.2f}%)*
+
+📊 *Volume Analysis:*
+• Total Volume: {analysis['total_volume']:,}
+• Avg Volume/min: {analysis['avg_volume']:,.0f}
 
 ✅ *Suggested Action:*
 {analysis['action']}
@@ -269,13 +279,13 @@ class NiftyFirstHourAnalyzer:
         
         return message
     
-    def run_analysis_and_notify(self):
+    def run_analysis_and_notify(self, target_date=None):
         """Run the analysis and send Telegram notification"""
         logger.info("🚀 Starting NIFTY first hour analysis...")
         
         try:
             # Run analysis
-            analysis = self.calculate_first_hour_movement()
+            analysis = self.calculate_first_hour_movement(target_date)
             
             if analysis:
                 # Format message
@@ -292,9 +302,10 @@ class NiftyFirstHourAnalyzer:
                 # Log to file for record
                 with open('nifty_first_hour_signals.csv', 'a') as f:
                     if f.tell() == 0:  # File is empty, write header
-                        f.write("timestamp,open,close,movement,movement_pct,signal,action\n")
-                    f.write(f"{analysis['timestamp']},{analysis['open_price']},{analysis['current_price']},"
-                           f"{analysis['price_movement']},{analysis['price_movement_pct']:.2f},"
+                        f.write("timestamp,analysis_date,open_time,close_time,open,close,high,low,movement,movement_pct,volume,signal,action\n")
+                    f.write(f"{analysis['timestamp']},{analysis['analysis_date']},{analysis['open_time']},{analysis['close_time']},"
+                           f"{analysis['open_price']},{analysis['current_price']},{analysis['high_price']},{analysis['low_price']},"
+                           f"{analysis['price_movement']},{analysis['price_movement_pct']:.2f},{analysis['total_volume']},"
                            f"{analysis['signal']},{analysis['action'].replace(',', ';')}\n")
                 
                 return True
@@ -310,15 +321,15 @@ class NiftyFirstHourAnalyzer:
             return False
     
     def scheduled_run(self):
-        """Run the analysis on schedule (10:15 AM on weekdays)"""
-        logger.info("📅 Scheduler started. Waiting for 10:15 AM on weekdays...")
+        """Run the analysis on schedule (10:16 AM on weekdays)"""
+        logger.info("📅 Scheduler started. Waiting for 10:16 AM on weekdays...")
         
-        # Schedule the job
-        schedule.every().monday.at("10:15").do(self.run_analysis_and_notify)
-        schedule.every().tuesday.at("10:15").do(self.run_analysis_and_notify)
-        schedule.every().wednesday.at("10:15").do(self.run_analysis_and_notify)
-        schedule.every().thursday.at("10:15").do(self.run_analysis_and_notify)
-        schedule.every().friday.at("10:15").do(self.run_analysis_and_notify)
+        # Schedule at 10:16 to ensure 10:15 candle is complete
+        schedule.every().monday.at("10:16").do(self.run_analysis_and_notify)
+        schedule.every().tuesday.at("10:16").do(self.run_analysis_and_notify)
+        schedule.every().wednesday.at("10:16").do(self.run_analysis_and_notify)
+        schedule.every().thursday.at("10:16").do(self.run_analysis_and_notify)
+        schedule.every().friday.at("10:16").do(self.run_analysis_and_notify)
         
         # Keep running
         while True:
@@ -329,22 +340,38 @@ def main():
     """Main function"""
     parser = argparse.ArgumentParser(description='NIFTY First Hour Movement Analyzer')
     parser.add_argument('--scheduled', action='store_true', 
-                       help='Run on schedule (10:15 AM every weekday)')
+                       help='Run on schedule (10:16 AM every weekday)')
     parser.add_argument('--test', action='store_true',
                        help='Run analysis immediately (for testing)')
+    parser.add_argument('--debug', action='store_true',
+                       help='Enable debug mode with detailed logging')
+    parser.add_argument('--date', type=str,
+                       help='Analyze specific date (YYYY-MM-DD format)')
     
     args = parser.parse_args()
     
     try:
-        # Initialize analyzer
-        analyzer = NiftyFirstHourAnalyzer()
+        # Initialize analyzer with debug mode if specified
+        analyzer = NiftyFirstHourAnalyzer(debug=args.debug)
+        
+        # Parse target date if provided
+        target_date = None
+        if args.date:
+            try:
+                # Parse date and set time to after first hour for analysis
+                parsed_date = datetime.strptime(args.date, '%Y-%m-%d')
+                target_date = parsed_date.replace(hour=10, minute=30)
+                logger.info(f"📅 Analyzing specific date: {args.date}")
+            except ValueError:
+                logger.error("❌ Invalid date format. Use YYYY-MM-DD")
+                return
         
         if args.scheduled:
             # Run on schedule
             analyzer.scheduled_run()
         else:
             # Run immediately
-            analyzer.run_analysis_and_notify()
+            analyzer.run_analysis_and_notify(target_date)
             
     except KeyboardInterrupt:
         logger.info("\n⏹️ Process interrupted by user")
